@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"regexp"
 	"strings"
 )
 
@@ -168,17 +169,17 @@ func (self *Model) FieldChanged(field_name string) bool {
 	return false
 }
 
-// Handles field name formatting.
-func (self *Model) format_field_name(field_name string) string {
-	//field_opts := self.GetOpts(field_name)
-	str := field_name
+// Used for format_field_name function
+var camelify = regexp.MustCompile("([a-z])([A-Z])")
 
-	// snake case it... we assume this if no column name was specified
-	str = matchFirstCap.ReplaceAllString(str, "${1}_${2}")
-	str = matchAllCap.ReplaceAllString(str, "${1}_${2}")
-	str = strings.ReplaceAll(str, "__", "_")
+// Handles field name formatting.
+func (self *Model) format_field_name(str string) string {
+	// Step 1. Put underscores between instances of [a-z][A-Z]
+	str = camelify.ReplaceAllString(str, "${1}_${2}")
+	// Step 2. Convert entire string to lowercase.
 	str = strings.ToLower(str)
 
+	// Finally... profit!
 	return str
 }
 
