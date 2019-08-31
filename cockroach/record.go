@@ -1,14 +1,14 @@
 package record
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
-
-	"database/sql"
 
 	_ "github.com/lib/pq"
 )
@@ -21,20 +21,26 @@ var matchFirstCap = regexp.MustCompile("(.)([A-Z][a-z]+)")
 var matchAllCap = regexp.MustCompile("([a-z0-9])([A-Z])")
 
 type Model struct {
-	Model      interface{}
-	PrimaryKey string
-	TableName  string
-	RowCount   int
+	Model                  interface{}
+	primary_key            string
+	primary_key_field_name string
+	TableName              string
+	JoinFrag               string
 
-	// Sanity
-	StructPkName string
+	//////////////////////////////////////
+	// Model description
+	// .................
+	// Used to keep track of struck fieldname to database column name
+	db_field_name map[string]string
+	// Used to keep track of which table each struct field belongs to
+	table_association map[string]string
+	// Used to know for db_opts.
+	options map[string]map[string]string
+	// Used to backtrack tablename.column to stuct fieldname
+	selector_associations map[string]string
 
-	// Extracted
-	Fields    []string
-	Values    map[string]interface{}
-	Types     map[string]string
-	Tags      map[string]string
-	DB_Fields map[string]string
+	// Used to keep track of values so we can handle row updates in .Save()
+	value_tracker map[string]interface{}
 
 	// Select builder
 	where_frag  string
@@ -43,317 +49,28 @@ type Model struct {
 	order_frags []string
 }
 
-/**************** OO Magic Function ****************/
-
 // Helper function to pull in Model struct data
 func (self *Model) Init(obj interface{}) {
 	self.Model = obj
 	self.Extract()
+	self.update_value_tracker()
 }
 
-/**************** CRUD Operation Functions ****************/
+// Update the value tacker
+func (self *Model) update_value_tracker() {
+	self.value_tracker = make(map[string]interface{})
 
-// Insert/Update
-func (self *Model) Save() error {
-	var err error
-	// Determine if we need to insert a new row or update an existing row.
-	if self.isset(self.StructPkName) {
-		err = self.update()
-	} else {
-		err = self.insert()
+	for field_name, _ := range self.db_field_name {
+		field := reflect.ValueOf(self.Model).Elem().FieldByName(field_name)
+		self.value_tracker[field_name] = field.Interface()
 	}
-
-	if err != nil {
-		return err
-	}
-
-	// Update extracted data...
-	self.Extract()
-
-	return nil
-}
-
-// Create
-func (self *Model) insert() error {
-	db_pk_name := self.format_field_name(self.StructPkName)
-
-	var field_selector []string
-	var input_serials []string
-	var values []interface{}
-	for i, field := range self.Fields {
-		// Need to filter primary key if we want it or not...
-		db_field_name := self.format_field_name(field)
-		if db_field_name != db_pk_name {
-			field_selector = append(field_selector, db_field_name)
-			input_serials = append(input_serials, "$"+strconv.Itoa(i))
-			values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(field).Interface())
-		}
-	}
-
-	generated_sql := "INSERT INTO " + self.TableName + " (" + strings.Join(field_selector, ", ") + ") VALUES (" + strings.Join(input_serials, ", ") + ") RETURNING " + db_pk_name + ";"
-
-	stmt, err := DB.Prepare(generated_sql)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	// Handle running and returning PrimaryKey based on the data type of the pk...
-
-	// Get pk field
-	field := reflect.ValueOf(self.Model).Elem().FieldByName(self.StructPkName)
-
-	// Switch action based on pk kind()...
-	switch field.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		var return_id int64
-		err = stmt.QueryRow(values...).Scan(&return_id)
-		if err != nil {
-			return err
-		}
-
-		field.SetInt(return_id)
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		var return_id uint64
-		err = stmt.QueryRow(values...).Scan(&return_id)
-		if err != nil {
-			return err
-		}
-
-		field.SetUint(return_id)
-	case reflect.String:
-		var return_id string
-		err = stmt.QueryRow(values...).Scan(&return_id)
-		if err != nil {
-			return err
-		}
-
-		field.SetString(return_id)
-	default:
-		// Do nothing
-		return errors.New("Primary key problem from Model.Insert()")
-	}
-
-	return nil
-}
-
-// Update
-func (self *Model) update() error {
-
-	changes_found := false
-	var field_selector []string
-	var values []interface{}
-	i := 1 // Have to initiate i for updates due to field selector being arbitrary
-	for _, field := range self.Fields {
-		if self.FieldChanged(field) {
-			changes_found = true
-			field_selector = append(field_selector, self.format_field_name(field)+" = $"+strconv.Itoa(i))
-			values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(field).Interface())
-			i++
-		}
-	}
-
-	// If nothing was changed, no need for running an UPDATE statement...
-	if !changes_found {
-		return nil
-	}
-
-	values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(self.StructPkName).Interface())
-
-	generated_sql := "UPDATE " + self.TableName + " SET " + strings.Join(field_selector, ",") + " WHERE " + self.format_field_name(self.StructPkName) + " = $" + strconv.Itoa(len(values)) + ";"
-
-	_, err := DB.Exec(generated_sql, values...)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Delete
-func (self *Model) Delete() error {
-	generated_sql := "DELETE FROM " + self.TableName + " WHERE " + self.format_field_name(self.StructPkName) + " = $1;"
-
-	// Get pk field
-	field := reflect.ValueOf(self.Model).Elem().FieldByName(self.StructPkName)
-
-	_, err := DB.Exec(generated_sql, field.Interface())
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Retreive
-func (self *Model) Where(sql string) *Model {
-	self.where_frag = sql
-
-	return self
-}
-func (self *Model) Limit(i int) *Model {
-	self.limit_frag = i
-	return self
-}
-func (self *Model) Start(i int) *Model {
-	self.offset_frag = i
-	return self
-}
-
-func (self *Model) Descending(field_name string) *Model {
-	ofrag := self.format_field_name(field_name) + " DESC"
-	self.order_frags = append(self.order_frags, ofrag)
-	return self
-}
-
-func (self *Model) Ascending(field_name string) *Model {
-	ofrag := self.format_field_name(field_name) + " ASC"
-	self.order_frags = append(self.order_frags, ofrag)
-	return self
-}
-
-func (self *Model) gen_query_sql() string {
-	generated_sql := "SELECT * FROM " + self.TableName
-	if self.where_frag != "" {
-		generated_sql += " WHERE " + self.where_frag
-	}
-	if len(self.order_frags) > 0 {
-		generated_sql += " ORDER BY " + strings.Join(self.order_frags, ", ")
-	}
-
-	if self.limit_frag != 0 {
-		generated_sql += " LIMIT " + strconv.Itoa(self.limit_frag)
-	}
-	if self.offset_frag != 0 {
-		generated_sql += " OFFSET " + strconv.Itoa(self.offset_frag)
-	}
-
-	return generated_sql
-}
-
-// Just fetch the first result....
-func (self *Model) Fetch(vals ...interface{}) error {
-	generated_sql := self.gen_query_sql()
-
-	rows, err := DB.Query(generated_sql, vals...)
-	if err != nil {
-		return err
-	}
-
-	if rows.Next() {
-		var references []interface{}
-		for _, field := range self.Fields {
-			references = append(references, reflect.ValueOf(self.Model).Elem().FieldByName(field).Addr().Interface())
-		}
-
-		if err := rows.Scan(references...); err != nil {
-			return err
-		}
-
-		// Update extracted data...
-		self.Extract()
-	}
-
-	return nil
-}
-
-// Iterate all results and run them through an anonymous function.
-// If the function returns FALSE, break the loop.
-func (self *Model) Each(fn func(error) bool, vals ...interface{}) {
-	generated_sql := self.gen_query_sql()
-
-	rows, err := DB.Query(generated_sql, vals...)
-	if err != nil {
-		fn(err)
-		return
-	}
-
-	defer rows.Close()
-	for rows.Next() {
-		var references []interface{}
-		for _, field := range self.Fields {
-			references = append(references, reflect.ValueOf(self.Model).Elem().FieldByName(field).Addr().Interface())
-		}
-
-		if err := rows.Scan(references...); err != nil {
-			fn(err)
-			return
-		}
-
-		// Update extracted data...
-		self.Extract()
-
-		// if fn(error)bool returns false, break the rows.Next() loop.
-		if !fn(nil) {
-			return
-		}
-	}
-}
-
-// Return the total number of results.
-func (self *Model) Count() int {
-	return 0
-}
-
-/**************** Utility Functions ****************/
-
-// Handles field name formatting.
-func (self *Model) format_field_name(field_name string) string {
-	field_opts := self.GetOpts(field_name)
-	str := field_name
-
-	// check tags for alternative column name
-	if db_field_name, ok := field_opts["column"]; ok {
-		return db_field_name
-	}
-
-	// snake case it... we assume this if no column name was specified
-	str = matchFirstCap.ReplaceAllString(str, "${1}_${2}")
-	str = matchAllCap.ReplaceAllString(str, "${1}_${2}")
-	str = strings.ReplaceAll(str, "__", "_")
-	str = strings.ToLower(str)
-
-	return str
-}
-
-// Determine if a field was set or not (mainly used for primary key checking)
-func (self *Model) isset(field_name string) bool {
-	field := reflect.ValueOf(self.Model).Elem().FieldByName(field_name)
-	if field.IsValid() {
-		// return comparison based on field kind. The new value is expected to be the same type...
-		switch field.Kind() {
-		case reflect.Int:
-			return field.Interface().(int) != 0
-		case reflect.Int8:
-			return field.Interface().(int8) != 0
-		case reflect.Int16:
-			return field.Interface().(int16) != 0
-		case reflect.Int32:
-			return field.Interface().(int32) != 0
-		case reflect.Int64:
-			return field.Interface().(int64) != 0
-		case reflect.Uint:
-			return field.Interface().(uint) != 0
-		case reflect.Uint8:
-			return field.Interface().(uint8) != 0
-		case reflect.Uint16:
-			return field.Interface().(uint16) != 0
-		case reflect.Uint32:
-			return field.Interface().(uint32) != 0
-		case reflect.Uint64:
-			return field.Interface().(uint64) != 0
-		case reflect.String:
-			return field.Interface().(string) != ""
-		}
-	}
-	return false
 }
 
 // Check if a field has changed, by field name
 func (self *Model) FieldChanged(field_name string) bool {
 	field := reflect.ValueOf(self.Model).Elem().FieldByName(field_name)
 	if field.IsValid() {
-		new_value, ok := self.Values[field_name]
+		new_value, ok := self.value_tracker[field_name]
 		if !ok {
 			return false
 		}
@@ -395,19 +112,15 @@ func (self *Model) FieldChanged(field_name string) bool {
 	return false
 }
 
-// Denature's object data from self.Model
 func (self *Model) Extract() {
-	// Initialize maps
-	self.Fields = nil
-	self.Values = make(map[string]interface{})
-	self.Types = make(map[string]string)
-	self.Tags = make(map[string]string)
-	self.DB_Fields = make(map[string]string)
+	self.db_field_name = make(map[string]string)
+	self.table_association = make(map[string]string)
+	self.options = make(map[string]map[string]string)
+	self.selector_associations = make(map[string]string)
 
 	s := reflect.ValueOf(self.Model).Elem()
 	stype := reflect.TypeOf(self.Model).Elem()
 	typeOfT := s.Type()
-
 	for i := 0; i < s.NumField(); i++ {
 		f := s.Field(i)
 		field, _ := stype.FieldByName(typeOfT.Field(i).Name)
@@ -415,60 +128,70 @@ func (self *Model) Extract() {
 		// Ensure the f.Type() is a string... lazymode...
 		field_type := fmt.Sprintf("%s", f.Type())
 
-		// We're not bothering with embedded types...
+		// Skip embedded types
 		if !strings.Contains(field_type, ".") {
 			field_name := typeOfT.Field(i).Name
+			db_field_name := self.format_field_name(field_name)
 
 			db_opts := field.Tag.Get("db_opts")
 			if db_opts != "-" {
-				self.Tags[field_name] = db_opts
-				self.Types[field_name] = typeOfT.Field(i).Name
-				self.Values[field_name] = f.Interface()
-				self.Fields = append(self.Fields, field_name)
-			}
+				self.db_field_name[field_name] = db_field_name
+				self.options[field_name] = make(map[string]string)
 
-			// self.StructPkName needs to have the REAL field name (sometimes you just have to save people from themselves)
-			if field_name == self.PrimaryKey {
-				self.StructPkName = field_name
-			} else if self.format_field_name(field_name) == self.format_field_name(self.PrimaryKey) {
-				self.StructPkName = field_name
+				for _, opt := range strings.Split(db_opts, ";") {
+					if strings.Contains(opt, ":") {
+						sep := strings.Split(opt, ":")
+						self.options[field_name][strings.ToLower(strings.TrimSpace(sep[0]))] = strings.TrimSpace(sep[1])
+					} else {
+						self.options[field_name][strings.ToLower(strings.TrimSpace(opt))] = "-"
+					}
+				}
+
+				// Alternative field names...
+				if _, ok := self.options[field_name]["column"]; ok {
+					self.db_field_name[field_name] = self.options[field_name]["column"]
+				}
+
+				// Set primary key name
+				if _, ok := self.options[field_name]["primary_key"]; ok {
+					if self.primary_key != "" {
+						log.Println("WARNING! Multiple primary keys assigned for (GoRecord only supports 1):", self.TableName)
+					}
+
+					self.primary_key = self.db_field_name[field_name]
+					self.primary_key_field_name = field_name
+				}
+
+				// Set table association
+				if _, ok := self.options[field_name]["table"]; ok {
+					self.table_association[field_name] = self.options[field_name]["table"]
+				} else {
+					self.table_association[field_name] = self.TableName
+				}
+
+				// Set selector association
+				association := self.table_association[field_name] + "." + self.db_field_name[field_name]
+				self.selector_associations[association] = field_name
 			}
 		}
 	}
+
 }
 
-// Get field db_opts that were defined in the model.
-func (self *Model) GetOpts(field_name string) map[string]string {
-	options := make(map[string]string)
-	for _, opt := range strings.Split(self.Tags[field_name], ";") {
-		if strings.Contains(opt, ":") {
-			sep := strings.Split(opt, ":")
-			options[strings.ToLower(strings.TrimSpace(sep[0]))] = strings.TrimSpace(sep[1])
-		} else {
-			options[strings.ToLower(strings.TrimSpace(opt))] = "-"
-		}
-	}
+// Handles field name formatting.
+func (self *Model) format_field_name(field_name string) string {
+	//field_opts := self.GetOpts(field_name)
+	str := field_name
 
-	return options
+	// snake case it... we assume this if no column name was specified
+	str = matchFirstCap.ReplaceAllString(str, "${1}_${2}")
+	str = matchAllCap.ReplaceAllString(str, "${1}_${2}")
+	str = strings.ReplaceAll(str, "__", "_")
+	str = strings.ToLower(str)
+
+	return str
 }
 
-/*
-CREATE TABLE IF NOT EXISTS users (
-	user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-	username STRING,
-	email STRING,
-	password STRING,
-	hashword STRING,
-	login_token STRING,
-	last_touch INT,
-	money INT,
-	exp INT,
-	admin BOOL
-);
-
-CREATE INDEX IF NOT EXISTS users_username_idx ON users (username);
-
-*/
 func (self *Model) field_db_datatype(field_name string) string {
 	field := reflect.ValueOf(self.Model).Elem().FieldByName(field_name)
 	if field.IsValid() {
@@ -493,62 +216,148 @@ func (self *Model) AutoMigrate() error {
 
 	var columns []string
 	var indexes []string
-	for _, field := range self.Fields {
-		field_opts := self.GetOpts(field)
+
+	for field_name, db_field_name := range self.db_field_name {
 
 		// Make the col string with the column name
-		col := self.format_field_name(field) + " "
+		col := db_field_name + " "
 
 		// If the dev specifies "raw", they need to write everything about the col
-		if _, ok := field_opts["raw"]; ok {
-			col += field_opts["raw"]
+		if _, ok := self.options[field_name]["raw"]; ok {
+			col += self.options[field_name]["raw"]
 		} else {
 			// Add it's DB data type
 			// We have to use the SERIAL data type for AUTO_INCREMENT
-			if _, ok := field_opts["auto_increment"]; ok {
+			if _, ok := self.options[field_name]["auto_increment"]; ok {
 				col += "SERIAL"
-			} else if opt, ok := field_opts["type"]; ok { // Check if a specific type was specified
+			} else if opt, ok := self.options[field_name]["type"]; ok { // Check if a specific type was specified
 				col += opt
 			} else { // Default to model check
-				col += self.field_db_datatype(field)
+				col += self.field_db_datatype(field_name)
 			}
 
 			// Is this a primary key?
-			if self.format_field_name(self.StructPkName) == self.format_field_name(field) {
+			if _, ok := self.options[field_name]["primary_key"]; ok {
 				col += " PRIMARY KEY"
 			}
 
 			// Unique?
-			if _, ok := field_opts["not null"]; ok {
+			if _, ok := self.options[field_name]["unique"]; ok {
 				col += " UNIQUE"
 			}
 
 			// Not null?
-			if _, ok := field_opts["not null"]; ok {
+			if _, ok := self.options[field_name]["not null"]; ok {
 				col += " NOT NULL"
 			}
 
 			// Default value?
-			if opt, ok := field_opts["default"]; ok {
+			if opt, ok := self.options[field_name]["default"]; ok {
 				col += " DEFAULT " + opt
 			}
 
 			// Add to indexes lines.
-			if opt, ok := field_opts["index"]; ok {
+			if opt, ok := self.options[field_name]["index"]; ok {
 				if opt == "-" {
-					opt = self.TableName + "_" + col + "_idx"
+					opt = self.TableName + "_" + db_field_name + "_idx"
 				}
-				indexes = append(indexes, "CREATE INDEX IF NOT EXISTS "+opt+" ON users ("+col+");")
+				indexes = append(indexes, "CREATE INDEX IF NOT EXISTS "+opt+" ON "+self.TableName+" ("+db_field_name+");")
 			}
 		}
 
 		columns = append(columns, col)
 	}
 
-	generated_sql := "CREATE TABLE IF NOT EXISTS " + self.TableName + " (\n    "
-	generated_sql += strings.Join(columns, ",\n    ")
-	generated_sql += "\n);\n"
-	generated_sql += strings.Join(indexes, ",\n")
+	create_table := "CREATE TABLE IF NOT EXISTS " + self.TableName + " (\n    "
+	create_table += strings.Join(columns, ",\n    ")
+	create_table += "\n);"
+
+	var generated_sql []string
+	generated_sql = append(generated_sql, create_table)
+	generated_sql = append(generated_sql, indexes...)
+
+	for _, entry := range generated_sql {
+		stmt, err := DB.Prepare(entry)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		if _, err = stmt.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+
+}
+
+// Determine if a field was set or not (mainly used for primary key checking)
+func (self *Model) isset(field_name string) bool {
+	field := reflect.ValueOf(self.Model).Elem().FieldByName(field_name)
+	if field.IsValid() {
+		// return comparison based on field kind. The new value is expected to be the same type...
+		switch field.Kind() {
+		case reflect.Int:
+			return field.Interface().(int) != 0
+		case reflect.Int8:
+			return field.Interface().(int8) != 0
+		case reflect.Int16:
+			return field.Interface().(int16) != 0
+		case reflect.Int32:
+			return field.Interface().(int32) != 0
+		case reflect.Int64:
+			return field.Interface().(int64) != 0
+		case reflect.Uint:
+			return field.Interface().(uint) != 0
+		case reflect.Uint8:
+			return field.Interface().(uint8) != 0
+		case reflect.Uint16:
+			return field.Interface().(uint16) != 0
+		case reflect.Uint32:
+			return field.Interface().(uint32) != 0
+		case reflect.Uint64:
+			return field.Interface().(uint64) != 0
+		case reflect.String:
+			return field.Interface().(string) != ""
+		}
+	}
+	return false
+}
+
+// Insert/Update
+func (self *Model) Save() error {
+	var err error
+	// Determine if we need to insert a new row or update an existing row.
+	if self.isset(self.primary_key_field_name) {
+		err = self.update()
+	} else {
+		err = self.insert()
+	}
+
+	if err != nil {
+		return err
+	}
+
+	self.update_value_tracker()
+
+	return nil
+}
+
+// Create
+func (self *Model) insert() error {
+
+	var fields []string
+	var values []interface{}
+	var input_serials []string
+	for field_name, db_field_name := range self.db_field_name {
+		if self.table_association[field_name] == self.TableName && db_field_name != self.primary_key {
+			fields = append(fields, db_field_name)
+			values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(field_name).Interface())
+			input_serials = append(input_serials, "$"+strconv.Itoa(len(input_serials)+1))
+		}
+	}
+
+	generated_sql := "INSERT INTO " + self.TableName + " (" + strings.Join(fields, ", ") + ") VALUES (" + strings.Join(input_serials, ", ") + ") RETURNING " + self.primary_key + ";"
 
 	stmt, err := DB.Prepare(generated_sql)
 	if err != nil {
@@ -556,9 +365,225 @@ func (self *Model) AutoMigrate() error {
 	}
 	defer stmt.Close()
 
-	_, err = stmt.Exec()
+	// Handle running and returning primary key based on the data type of the pk...
 
-	return err
+	// Get pk field
+	field := reflect.ValueOf(self.Model).Elem().FieldByName(self.primary_key_field_name)
+
+	// Switch action based on pk kind()...
+	switch field.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		var return_id int64
+		err = stmt.QueryRow(values...).Scan(&return_id)
+		if err != nil {
+			return err
+		}
+
+		field.SetInt(return_id)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		var return_id uint64
+		err = stmt.QueryRow(values...).Scan(&return_id)
+		if err != nil {
+			return err
+		}
+
+		field.SetUint(return_id)
+	case reflect.String:
+		var return_id string
+		err = stmt.QueryRow(values...).Scan(&return_id)
+		if err != nil {
+			return err
+		}
+
+		field.SetString(return_id)
+	default:
+		// Do nothing
+		return errors.New("Primary key problem from Model.Insert()")
+	}
+
+	return nil
+}
+
+// Update
+func (self *Model) update() error {
+
+	changes_found := false
+	var set_fields []string
+	var values []interface{}
+	for field_name, db_field_name := range self.db_field_name {
+		if self.table_association[field_name] == self.TableName && self.FieldChanged(field_name) {
+			set_fields = append(set_fields, db_field_name+" = $"+strconv.Itoa(len(set_fields)+1))
+			values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(field_name).Interface())
+			changes_found = true
+		}
+	}
+
+	// If nothing was changed, no need for running an UPDATE statement...
+	if !changes_found {
+		return nil
+	}
+
+	// Add primary key value
+	values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(self.primary_key_field_name).Interface())
+
+	// Generate update statement
+	generated_sql := "UPDATE " + self.TableName + " SET " + strings.Join(set_fields, ",") + " WHERE " + self.primary_key + " = $" + strconv.Itoa(len(values)) + ";"
+
+	// Run the query.
+	_, err := DB.Exec(generated_sql, values...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// Delete
+func (self *Model) Delete() error {
+	generated_sql := "DELETE FROM " + self.TableName + " WHERE " + self.primary_key + " = $1;"
+
+	// Get pk field
+	field := reflect.ValueOf(self.Model).Elem().FieldByName(self.primary_key_field_name)
+
+	_, err := DB.Exec(generated_sql, field.Interface())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Retreive
+func (self *Model) Where(sql string) *Model {
+	self.where_frag = sql
+
+	return self
+}
+func (self *Model) Limit(i int) *Model {
+	self.limit_frag = i
+	return self
+}
+func (self *Model) Start(i int) *Model {
+	self.offset_frag = i
+	return self
+}
+
+func (self *Model) Descending(field_name string) *Model {
+	ofrag := self.format_field_name(field_name) + " DESC"
+	self.order_frags = append(self.order_frags, ofrag)
+	return self
+}
+
+func (self *Model) Ascending(field_name string) *Model {
+	ofrag := self.format_field_name(field_name) + " ASC"
+	self.order_frags = append(self.order_frags, ofrag)
+	return self
+}
+
+func (self *Model) Fetch(vals ...interface{}) error {
+
+	generated_sql := self.gen_select()
+
+	rows, err := DB.Query(generated_sql, vals...)
+	if err != nil {
+		return err
+	}
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	if rows.Next() {
+		references := self.get_selector_associations(cols...)
+
+		if err := rows.Scan(references...); err != nil {
+			return err
+		}
+
+		// Update tracked data...
+		self.update_value_tracker()
+	}
+
+	return nil
+}
+
+func (self *Model) Each(fn func(error) bool, vals ...interface{}) {
+	generated_sql := self.gen_select()
+
+	rows, err := DB.Query(generated_sql, vals...)
+	if err != nil {
+		fn(err)
+		return
+	}
+
+	cols, err := rows.Columns()
+	if err != nil {
+		fn(err)
+		return
+	}
+
+	defer rows.Close()
+	for rows.Next() {
+		references := self.get_selector_associations(cols...)
+
+		if err := rows.Scan(references...); err != nil {
+			fn(err)
+			return
+		}
+
+		// Update tracked data...
+		self.update_value_tracker()
+
+		// if fn(error)bool returns false, break the rows.Next() loop.
+		if !fn(nil) {
+			return
+		}
+	}
+}
+
+// Returns array of pointers to the fields in the table structure.
+// Allows easy rows.Scan() to take place.
+func (self *Model) get_selector_associations(cols ...string) []interface{} {
+	var references []interface{}
+	for _, selector := range cols {
+		references = append(references, reflect.ValueOf(self.Model).Elem().FieldByName(self.selector_associations[selector]).Addr().Interface())
+	}
+
+	return references
+}
+
+func (self *Model) gen_select() string {
+	var selected_fields []string
+
+	for field_name, db_field_name := range self.db_field_name {
+		select_frag := self.table_association[field_name] + "." + db_field_name + " as \"" + self.table_association[field_name] + "." + db_field_name + "\""
+		selected_fields = append(selected_fields, select_frag)
+	}
+
+	generated_sql := "SELECT " + strings.Join(selected_fields, ", ") + " FROM " + self.TableName
+
+	/* TODO: NEED TO BUILD JOIN FRAGMENT....
+	Joins should be built from tags...
+
+	EXAMPLE: join t2 on t1.t1_id = t2.t1_id
+	*/
+
+	if self.where_frag != "" {
+		generated_sql += " WHERE " + self.where_frag
+	}
+
+	if len(self.order_frags) > 0 {
+		generated_sql += " ORDER BY " + strings.Join(self.order_frags, ", ")
+	}
+
+	if self.limit_frag != 0 {
+		generated_sql += " LIMIT " + strconv.Itoa(self.limit_frag)
+	}
+	if self.offset_frag != 0 {
+		generated_sql += " OFFSET " + strconv.Itoa(self.offset_frag)
+	}
+
+	return generated_sql + ";"
 }
 
 /**************** Initialization Functions ****************/
