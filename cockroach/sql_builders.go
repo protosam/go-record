@@ -25,7 +25,8 @@ func (self *Model) CreateTable() error {
 	var columns []string
 	var indexes []string
 
-	for field_name, db_field_name := range self.db_field_name {
+	for _, field_name := range self.fields {
+		db_field_name := self.db_field_name[field_name]
 
 		// Make the col string with the column name
 		col := db_field_name + " "

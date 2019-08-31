@@ -19,6 +19,8 @@ type Model struct {
 	//////////////////////////////////////
 	// Model description
 	// .................
+	// Neccessary evil to ensure field_names are kept in order in the schema
+	fields []string
 	// Used to keep track of struck fieldname to database column name
 	db_field_name map[string]string
 	// Used to keep track of which table each struct field belongs to
@@ -52,6 +54,7 @@ func (self *Model) Extract() {
 	self.table_association = make(map[string]string)
 	self.options = make(map[string]map[string]string)
 	self.selector_associations = make(map[string]string)
+	self.fields = make([]string, 0)
 
 	s := reflect.ValueOf(self.Model).Elem()
 	stype := reflect.TypeOf(self.Model).Elem()
@@ -107,6 +110,7 @@ func (self *Model) Extract() {
 				// Set selector association
 				association := self.table_association[field_name] + "." + self.db_field_name[field_name]
 				self.selector_associations[association] = field_name
+				self.fields = append(self.fields, field_name)
 			}
 		}
 	}
