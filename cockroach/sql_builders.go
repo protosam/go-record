@@ -158,3 +158,8 @@ func (self *Model) field_db_datatype(field_name string) string {
 	}
 	return "STRING"
 }
+
+// Generates DELETE statements to be executed.
+func (self *Model) gen_delete() string {
+	return "DELETE FROM " + self.TableName + " WHERE " + self.primary_key + " = $1;"
+}

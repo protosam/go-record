@@ -100,7 +100,16 @@ Example: `db_opts:"-"`
 #### Create a Table
 This will take your model structure and make a table schema.
 ```
-err := Users{}.New().AutoMigrate();
+err := Users{}.New().CreateTable();
+if err != nil {
+	log.Fatal(err)
+}
+```
+
+#### Delete a Table
+This will take your model structure and make a table schema.
+```
+err := Users{}.New().DeleteTable();
 if err != nil {
 	log.Fatal(err)
 }

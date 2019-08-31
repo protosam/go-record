@@ -111,6 +111,7 @@ func (self *Model) update() error {
 	values = append(values, reflect.ValueOf(self.Model).Elem().FieldByName(self.primary_key_field_name).Interface())
 
 	// Generate update statement
+	// TODO: need to generate this somehow.... ^ I'm partially building this above.
 	generated_sql := "UPDATE " + self.TableName + " SET " + strings.Join(set_fields, ",") + " WHERE " + self.primary_key + " = $" + strconv.Itoa(len(values)) + ";"
 
 	// Run the query.
@@ -123,7 +124,7 @@ func (self *Model) update() error {
 
 // Delete
 func (self *Model) Delete() error {
-	generated_sql := "DELETE FROM " + self.TableName + " WHERE " + self.primary_key + " = $1;"
+	generated_sql := self.gen_delete()
 
 	// Get pk field
 	field := reflect.ValueOf(self.Model).Elem().FieldByName(self.primary_key_field_name)
