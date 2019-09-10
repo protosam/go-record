@@ -133,6 +133,32 @@ func (self *Model) gen_select() string {
 	return generated_sql + ";"
 }
 
+// Generates SELECT COUNT(*) statements to be executed.
+func (self *Model) gen_select_count() string {
+	generated_sql := "SELECT COUNT(*) FROM " + self.TableName
+
+	if self.JoinFrag != "" {
+		generated_sql += " " + self.JoinFrag
+	}
+
+	if self.where_frag != "" {
+		generated_sql += " WHERE " + self.where_frag
+	}
+
+	if len(self.order_frags) > 0 {
+		generated_sql += " ORDER BY " + strings.Join(self.order_frags, ", ")
+	}
+
+	if self.limit_frag != 0 {
+		generated_sql += " LIMIT " + strconv.Itoa(self.limit_frag)
+	}
+	if self.offset_frag != 0 {
+		generated_sql += " OFFSET " + strconv.Itoa(self.offset_frag)
+	}
+
+	return generated_sql + ";"
+}
+
 // Generates INSERT statements to be executed.
 func (self *Model) gen_insert(fields, input_serials []string) string {
 	return "INSERT INTO " + self.TableName + " (" + strings.Join(fields, ", ") + ") VALUES (" + strings.Join(input_serials, ", ") + ") RETURNING " + self.primary_key + ";"

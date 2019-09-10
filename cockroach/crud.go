@@ -225,3 +225,22 @@ func (self *Model) Each(fn func(error) bool, vals ...interface{}) {
 		}
 	}
 }
+
+func (self *Model) Count(vals ...interface{}) (int, error) {
+
+	generated_sql := self.gen_select_count()
+
+	rows, err := DB.Query(generated_sql, vals...)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return count, err
+		}
+	}
+
+	return count, nil
+}
