@@ -146,7 +146,10 @@ Getting data back from the database can get a bit complicated, so we're starting
 Once `.Fetch()` is called, it will fill the model structure with the data of the first row returned.
 ```
 u := Users{}.New()
-u.Where("user_id = $1").Fetch(new_user_id)
+err := u.Where("user_id = $1").Fetch(new_user_id)
+if err != nil {
+	fmt.Println(err)
+}
 fmt.Println(u.Username)
 ```
 
@@ -161,6 +164,15 @@ u.Where("cool_points > $1").Each(func(err error) bool {
 }, 100)
 ```
 
+### Count
+Similar to how `.Fetch()` works, `.Count()` just returns a row count and error value.
+```
+u := Users{}.New()
+if count, err := u.Where("email = $1").Fetch("some_email_addr@website.tld"); err != nil {
+	fmt.Println(err)
+}
+fmt.Println(count)
+```
 
 #### Update a Record
 ```
