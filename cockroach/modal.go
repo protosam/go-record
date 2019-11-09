@@ -11,33 +11,33 @@ import (
 // Base super struct to be embedded in models.
 type Model struct {
 	Model                  interface{} `json:"-"`
-	primary_key            string      `json:"-"`
-	primary_key_field_name string      `json:"-"`
-	TableName              string      `json:"-"`
-	JoinFrag               string      `json:"-"`
+	primary_key            string
+	primary_key_field_name string
+	TableName              string `json:"-"`
+	JoinFrag               string `json:"-"`
 
 	//////////////////////////////////////
 	// Model description
 	// .................
 	// Neccessary evil to ensure field_names are kept in order in the schema
-	fields []string `json:"-"`
+	fields []string
 	// Used to keep track of struck fieldname to database column name
-	db_field_name map[string]string `json:"-"`
+	db_field_name map[string]string
 	// Used to keep track of which table each struct field belongs to
-	table_association map[string]string `json:"-"`
+	table_association map[string]string
 	// Used to know for db_opts.
-	options map[string]map[string]string `json:"-"`
+	options map[string]map[string]string
 	// Used to backtrack tablename.column to stuct fieldname
-	selector_associations map[string]string `json:"-"`
+	selector_associations map[string]string
 
 	// Used to keep track of values so we can handle row updates in .Save()
-	value_tracker map[string]interface{} `json:"-"`
+	value_tracker map[string]interface{}
 
 	// Select builder
-	where_frag  string   `json:"-"`
-	limit_frag  int      `json:"-"`
-	offset_frag int      `json:"-"`
-	order_frags []string `json:"-"`
+	where_frag  string
+	limit_frag  int
+	offset_frag int
+	order_frags []string
 }
 
 // Helper function to pull in Model struct data
